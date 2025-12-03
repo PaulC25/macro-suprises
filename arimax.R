@@ -1,6 +1,7 @@
 # import libraries
 # install.packages("forecast")
 library(forecast)
+# install.packages("ggplot2")
 library(ggplot2)
 # install.packages("patchwork")
 library(patchwork)
@@ -20,15 +21,26 @@ data_full <- merge(spx_data, macro_data, by = "date", all.x = TRUE)
 data <- data_full[c("date",
                     "ln_return",
                     "NFP_surprise",
-                    "core_CPE_surprise",
+                    "core_PCE_surprise",
                     "core_retail_sales_surprise")]
 
-macro_cols <- c("NFP_surprise", "core_CPE_surprise", "core_retail_sales_surprise")
+
+corr_df <- data[c("ln_return", 
+                  "NFP_surprise", 
+                  "core_PCE_surprise", 
+                  "core_retail_sales_surprise")]
+
+# get correlation matrix while handling NAs
+corr_mat <- cor(corr_df, use = "pairwise.complete.obs")
+
+print(corr_mat)
+
+macro_cols <- c("NFP_surprise", "core_PCE_surprise", "core_retail_sales_surprise")
 
 # define X matrix of macro surprises
 X <- data[macro_cols]
 
-# extractt means and sds for interpretation + scenario scaling
+# extract means and sds for interpretation + scenario scaling
 macro_means <- colMeans(X, na.rm = TRUE)
 macro_sds <- apply(X, 2, sd, na.rm = TRUE)
 
@@ -37,11 +49,13 @@ print(macro_means)
 print("Macro indicator sds:")
 print(macro_sds)
 
-# replace NA surprises with 0 (no surprise on that day)
-X[is.na(X)] <- 0
-
 # scale all X
 scaled_X <- scale(X)
+
+# replace NA surprises with 0 (no surprise on that day)
+scaled_X[is.na(scaled_X)] <- 0
+
+# define xreg
 xreg <- as.matrix(scaled_X)
 
 # define target variable
@@ -69,12 +83,11 @@ print(summary(fit_train))
 # out-of-sample forecast on test set
 fc_test <- forecast(fit_train, xreg = xreg_test, h = nrow(xreg_test))
 
-# y_hat <- as.numeric(fc_test$mean)
 y_hat <- fc_test$mean
 
 # basic error metrics
 rmse <- sqrt(mean((y_hat - y_test)^2, na.rm = TRUE))
-mae  <- mean(abs(y_hat - y_test), na.rm = TRUE)
+mae <- mean(abs(y_hat - y_test), na.rm = TRUE)
 dir_acc <- mean(sign(y_hat) == sign(y_test), na.rm = TRUE)
 
 cat("Out-of-sample performance;\n")
@@ -83,21 +96,40 @@ cat("MAE: ", mae,  "\n")
 cat("Directional accuracy:", round(100 * dir_acc, 2), "%\n")
 
 # refit on full data after satisfactory training performance
-fit <- auto.arima(y, xreg = xreg, seasonal = FALSE)
+train_specs <- arimaorder(fit_train)
+fit <- Arima(y, order = train_specsspec, xreg = xreg, seasonal = FALSE)
 
 cat("\nFull-sample model (used for scenario analysis):\n")
 print(summary(fit))
+
+# extract estimated daily volatility
+sigma_hat <- sqrt(summary(fit)$sigma2)
+cat("Estimated daily volatility (sd of residuals):", round(100 * sigma_hat, 2), "%\n")
+
+# extract and print coefficients
+cat("\nCoefficient Table:\n")
+coef_table <- summary(fit)$coef
+print(coef_table)
+
+coef_nfp <- coef_table["NFP_surprise"]
+coef_pce <- coef_table["core_PCE_surprise"]
+coef_retail <- coef_table["core_retail_sales_surprise"]
+
+bps_per_sd <- 100 * 100 * c(NFP = coef_nfp, PCE = coef_pce, Retail = coef_retail) 
+print(bps_per_sd)
+
+# check residuals
 print(checkresiduals(fit))
 
 scenario_analysis <- function(nfp_surprise = 0,
-                              core_CPE_surprise = 0,
+                              core_PCE_surprise = 0,
                               core_retail_sales_surprise = 0,
                               scaled = FALSE) {
 
   # collect scenario inputs
   scenario <- c(
-    NFP_surprise               = nfp_surprise,
-    core_CPE_surprise          = core_CPE_surprise,
+    NFP_surprise = nfp_surprise,
+    core_PCE_surprise = core_PCE_surprise,
     core_retail_sales_surprise = core_retail_sales_surprise
   )
   
@@ -115,28 +147,27 @@ scenario_analysis <- function(nfp_surprise = 0,
   mu <- fc$mean[1]
   
   # back out standard deviation from 95% interval
-  z    <- qnorm(0.975)
+  z  <- qnorm(0.975)
   lo95 <- fc$lower[1, "95%"]
   hi95 <- fc$upper[1, "95%"]
   
   sd_from_hi <- (hi95 - mu) / z
   sd_from_lo <- (mu - lo95) / z
-  sd_hat     <- mean(c(sd_from_hi, sd_from_lo))
+  sd_hat <- mean(c(sd_from_hi, sd_from_lo))
   
   # return predictive mean and sd
   return(list(mu = mu, sd = sd_hat))
 }
 
-
 plot_scenario <- function(nfp_surprise = 0,
-                          core_CPE_surprise = 0,
+                          core_PCE_surprise = 0,
                           core_retail_sales_surprise = 0,
                           scaled = FALSE) {
   
   # call scenario analysis function
   scenario_res <- scenario_analysis(
     nfp_surprise = nfp_surprise,
-    core_CPE_surprise = core_CPE_surprise,
+    core_PCE_surprise = core_PCE_surprise,
     core_retail_sales_surprise = core_retail_sales_surprise,
     scaled = scaled
   )
@@ -144,7 +175,7 @@ plot_scenario <- function(nfp_surprise = 0,
   mu <- scenario_res$mu
   sd <- scenario_res$sd
   
-  # Monte Carlo sample from predictive distribution
+  # sample from normal predictive distribution
   set.seed(42)
   N <- 10000
   sim_ret <- rnorm(N, mean = mu, sd = sd)
@@ -159,8 +190,8 @@ plot_scenario <- function(nfp_surprise = 0,
                linetype = "dashed", linewidth = 1) +
     labs(
       title = sprintf(
-        "Predictive Distribution of Daily SPX Returns\nunder Macro Surprise Scenario\nNFP: %s, Core CPE: %s, Core Retail Sales: %s\n(scaled = %s)",
-        nfp_surprise, core_CPE_surprise, core_retail_sales_surprise, scaled
+        "Predictive Distribution of Daily SPX Returns\nunder Macro Surprise Scenario\nNFP: %s, Core PCE: %s, Core Retail Sales: %s\n(scaled = %s)",
+        nfp_surprise, core_PCE_surprise, core_retail_sales_surprise, scaled
       ),
       x = "Simulated daily return (%)",
       y = "Density"
@@ -169,35 +200,49 @@ plot_scenario <- function(nfp_surprise = 0,
 }
 
 # define scenarios to plot
+base_plot_scaled <- plot_scenario(scaled = TRUE)
 nfp_2sd_plot <- plot_scenario(nfp_surprise = 2, scaled = TRUE)
 nfp_neg2sd_plot <- plot_scenario(nfp_surprise = -2, scaled = TRUE)
-cpe_2sd_plot <- plot_scenario(core_CPE_surprise = 2, scaled = TRUE)
-cpe_neg2sd_plot <- plot_scenario(core_CPE_surprise = -2, scaled = TRUE)
+PCE_2sd_plot <- plot_scenario(core_PCE_surprise = 2, scaled = TRUE)
+PCE_neg2sd_plot <- plot_scenario(core_PCE_surprise = -2, scaled = TRUE)
 retail_2sd_plot <- plot_scenario(core_retail_sales_surprise = 2, scaled = TRUE)
 retail_neg2sd_plot <- plot_scenario(core_retail_sales_surprise = -2, scaled = TRUE)
 # print scenario plots
-print(nfp_2sd_plot + nfp_neg2sd_plot)
+print(base_plot_scaled + nfp_2sd_plot + nfp_neg2sd_plot)
 print(scenario_analysis(nfp_surprise = 2, scaled = TRUE)$mu)
 print(scenario_analysis(nfp_surprise = -2, scaled = TRUE)$mu)
-print(cpe_2sd_plot + cpe_neg2sd_plot)
-print(scenario_analysis(core_CPE_surprise = 2, scaled = TRUE)$mu)
-print(scenario_analysis(core_CPE_surprise = -2, scaled = TRUE)$mu)
-print(retail_2sd_plot + retail_neg2sd_plot)
+print(base_plot_scaled + PCE_2sd_plot + PCE_neg2sd_plot)
+print(scenario_analysis(core_PCE_surprise = 2, scaled = TRUE)$mu)
+print(scenario_analysis(core_PCE_surprise = -2, scaled = TRUE)$mu)
+print(base_plot_scaled + retail_2sd_plot + retail_neg2sd_plot)
 print(scenario_analysis(core_retail_sales_surprise = 2, scaled = TRUE)$mu)
-print(plot_scenario(core_retail_sales_surprise = -2, scaled = TRUE)$mu)
+print(scenario_analysis(core_retail_sales_surprise = -2, scaled = TRUE)$mu)
 
-# deine range of z-scores for reaction curves
+# define unscaled scenarrios
+base_plot <- plot_scenario(scaled = FALSE)
+nfp_plus5m_plot <- plot_scenario(nfp_surprise = 5000000, scaled = FALSE)
+nfp_minus5m_plot <- plot_scenario(nfp_surprise = 5000000, scaled = FALSE)
+PCE_plus3_plot <- plot_scenario(core_PCE_surprise = 0.03, scaled = FALSE)
+PCE_minus3_plot <- plot_scenario(core_PCE_surprise = -0.03, scaled = FALSE)
+retail_plus3_plot <- plot_scenario(core_retail_sales_surprise = 0.03, scaled = FALSE)
+retail_minus3_plot <- plot_scenario(core_retail_sales_surprise = -0.03, scaled = FALSE)
+# print unscaled scenario plots
+print(base_plot + nfp_p5m_plot + nfp_5m_plot)
+print(base_plot + PCE_plus3_plot + PCE_minus3_plot)
+print(base_plot + retail_plus3_plot + retail_minus3_plot)
+
+# define range of z-scores for reaction curves
 z_vals <- seq(-3, 3, by = 0.1)
 
 # helper to build one reaction curve
-build_reaction_df <- function(which_var = c("NFP", "CPE", "Retail")) {
+build_reaction_df <- function(which_var = c("NFP", "PCE", "Retail")) {
   which_var <- match.arg(which_var)
   mu_vals <- numeric(length(z_vals))
 
   for (i in seq_along(z_vals)) {
     res <- scenario_analysis(
       nfp_surprise = if (which_var == "NFP") z_vals[i] else 0,
-      core_CPE_surprise = if (which_var == "CPE") z_vals[i] else 0,
+      core_PCE_surprise = if (which_var == "PCE") z_vals[i] else 0,
       core_retail_sales_surprise = if (which_var == "Retail") z_vals[i] else 0,
       scaled = TRUE
     )
@@ -212,19 +257,19 @@ build_reaction_df <- function(which_var = c("NFP", "CPE", "Retail")) {
   # change vs baseline, in basis points
   df$delta_bp <- (df$mu_pct - mu0) * 100
 
-  df
+  return(df)
 }
 
 # build each curve
 df_nfp <- build_reaction_df("NFP")
-df_cpe <- build_reaction_df("CPE")
+df_PCE <- build_reaction_df("PCE")
 df_retail <- build_reaction_df("Retail")
 
 print(head(df_nfp))
-print(head(df_cpe))
+print(head(df_PCE))
 print(head(df_retail))
 
-# plots: change in expected return (bps) instead of raw %
+# plots of change in expected return (bps) instead of raw %
 nfp_reaction_plot <- ggplot(df_nfp, aes(x = z, y = delta_bp)) +
   geom_hline(yintercept = 0, linetype = "dashed") +
   geom_line(linewidth = 1) +
@@ -235,7 +280,7 @@ nfp_reaction_plot <- ggplot(df_nfp, aes(x = z, y = delta_bp)) +
     y = "Change in expected daily return (bps)"
   )
 
-cpe_reaction_plot <- ggplot(df_cpe, aes(x = z, y = delta_bp)) +
+PCE_reaction_plot <- ggplot(df_PCE, aes(x = z, y = delta_bp)) +
   geom_hline(yintercept = 0, linetype = "dashed") +
   geom_line(linewidth = 1) +
   coord_cartesian(ylim = c(-20, 20)) +
@@ -256,4 +301,4 @@ retail_reaction_plot <- ggplot(df_retail, aes(x = z, y = delta_bp)) +
   )
 
 # show all plots together
-print(nfp_reaction_plot / cpe_reaction_plot / retail_reaction_plot)
+print(nfp_reaction_plot / PCE_reaction_plot / retail_reaction_plot)

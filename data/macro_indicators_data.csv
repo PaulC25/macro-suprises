@@ -1,4 +1,4 @@
-date,NFP_actual,NFP_forecast,NFP_surprise,core_CPE_actual,core_CPE_forecast,core_CPE_surprise,core_retail_sales_actual,core_retail_sales_forecast,core_retail_sales_surprise
+date,NFP_actual,NFP_forecast,NFP_surprise,core_PCE_actual,core_PCE_forecast,core_PCE_surprise,core_retail_sales_actual,core_retail_sales_forecast,core_retail_sales_surprise
 2009-12-23,,,,0.0,0.001,-0.001,,,
 2009-12-24,,,,,,,,,
 2009-12-25,,,,,,,,,
