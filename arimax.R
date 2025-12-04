@@ -5,10 +5,12 @@ library(forecast)
 library(ggplot2)
 # install.packages("patchwork")
 library(patchwork)
-
+# install.packages("MASS")
+library(MASS)
 
 # load in sp500 returns + macro surprises
 spx_data <- read.csv("data/sp500_hist_returns.csv")
+spx_data <- na.omit(spx_data)
 macro_data <- read.csv("data/macro_indicators_data.csv")
 
 # reformat date columns
@@ -61,6 +63,10 @@ xreg <- as.matrix(scaled_X)
 # define target variable
 y <- data$ln_return
 
+# fit t-distribution using MLE
+df_fit <- fitdistr(y, "t")
+deg_freedom <- df_fit$estimate["df"]
+
 # train-test split validation
 cut_date <- as.Date("2022-12-31")
 
@@ -70,7 +76,7 @@ test_idx  <- data$date >  cut_date
 y_train <- y[train_idx]
 y_test <- y[test_idx]
 xreg_train <- xreg[train_idx, , drop = FALSE]
-xreg_test <- xreg[test_idx,  , drop = FALSE]
+xreg_test <- xreg[test_idx, , drop = FALSE]
 
 cat("Train size:", length(y_train), " Test size:", length(y_test), "\n")
 
@@ -97,14 +103,11 @@ cat("Directional accuracy:", round(100 * dir_acc, 2), "%\n")
 
 # refit on full data after satisfactory training performance
 train_specs <- arimaorder(fit_train)
-fit <- Arima(y, order = train_specsspec, xreg = xreg, seasonal = FALSE)
+print(train_specs)
+fit <- Arima(y, order = train_specs, xreg = xreg, seasonal = FALSE)
 
-cat("\nFull-sample model (used for scenario analysis):\n")
+cat("\nFull-sample model:\n")
 print(summary(fit))
-
-# extract estimated daily volatility
-sigma_hat <- sqrt(summary(fit)$sigma2)
-cat("Estimated daily volatility (sd of residuals):", round(100 * sigma_hat, 2), "%\n")
 
 # extract and print coefficients
 cat("\nCoefficient Table:\n")
@@ -172,13 +175,19 @@ plot_scenario <- function(nfp_surprise = 0,
     scaled = scaled
   )
   
+  # extract degrees of freedom from earlier fit
+  deg_freedom <- df_fit$estimate["df"]
+
   mu <- scenario_res$mu
   sd <- scenario_res$sd
+
+  # adjust sd for t-distribution
+  sd_t <- sd * (qnorm(0.975) / qt(0.975, deg_freedom))
   
-  # sample from normal predictive distribution
+  # sample from t-student predictive distribution
   set.seed(42)
   N <- 10000
-  sim_ret <- rnorm(N, mean = mu, sd = sd)
+  sim_ret <- mu + sd_t * rt(N, df = deg_freedom)
   
   # Plot histogram + density of simulated returns (in %)
   sim_df <- data.frame(ret = 100 * sim_ret)
@@ -199,8 +208,11 @@ plot_scenario <- function(nfp_surprise = 0,
   return(p)
 }
 
-# define scenarios to plot
+# define base plots
 base_plot_scaled <- plot_scenario(scaled = TRUE)
+base_plot_unscaled <- plot_scenario(scaled = FALSE)
+
+# define scenario plots at +/- 2 sd surprises
 nfp_2sd_plot <- plot_scenario(nfp_surprise = 2, scaled = TRUE)
 nfp_neg2sd_plot <- plot_scenario(nfp_surprise = -2, scaled = TRUE)
 PCE_2sd_plot <- plot_scenario(core_PCE_surprise = 2, scaled = TRUE)
@@ -208,28 +220,17 @@ PCE_neg2sd_plot <- plot_scenario(core_PCE_surprise = -2, scaled = TRUE)
 retail_2sd_plot <- plot_scenario(core_retail_sales_surprise = 2, scaled = TRUE)
 retail_neg2sd_plot <- plot_scenario(core_retail_sales_surprise = -2, scaled = TRUE)
 # print scenario plots
-print(base_plot_scaled + nfp_2sd_plot + nfp_neg2sd_plot)
+print(base_plot_unscaled / nfp_2sd_plot / nfp_neg2sd_plot)
 print(scenario_analysis(nfp_surprise = 2, scaled = TRUE)$mu)
 print(scenario_analysis(nfp_surprise = -2, scaled = TRUE)$mu)
-print(base_plot_scaled + PCE_2sd_plot + PCE_neg2sd_plot)
+print(scenario_analysis(scaled = TRUE)$mu)
+print(scenario_analysis(scaled = FALSE)$mu)
+print(base_plot_scaled / PCE_2sd_plot / PCE_neg2sd_plot)
 print(scenario_analysis(core_PCE_surprise = 2, scaled = TRUE)$mu)
 print(scenario_analysis(core_PCE_surprise = -2, scaled = TRUE)$mu)
-print(base_plot_scaled + retail_2sd_plot + retail_neg2sd_plot)
+print(base_plot_scaled / retail_2sd_plot / retail_neg2sd_plot)
 print(scenario_analysis(core_retail_sales_surprise = 2, scaled = TRUE)$mu)
 print(scenario_analysis(core_retail_sales_surprise = -2, scaled = TRUE)$mu)
-
-# define unscaled scenarrios
-base_plot <- plot_scenario(scaled = FALSE)
-nfp_plus5m_plot <- plot_scenario(nfp_surprise = 5000000, scaled = FALSE)
-nfp_minus5m_plot <- plot_scenario(nfp_surprise = 5000000, scaled = FALSE)
-PCE_plus3_plot <- plot_scenario(core_PCE_surprise = 0.03, scaled = FALSE)
-PCE_minus3_plot <- plot_scenario(core_PCE_surprise = -0.03, scaled = FALSE)
-retail_plus3_plot <- plot_scenario(core_retail_sales_surprise = 0.03, scaled = FALSE)
-retail_minus3_plot <- plot_scenario(core_retail_sales_surprise = -0.03, scaled = FALSE)
-# print unscaled scenario plots
-print(base_plot + nfp_p5m_plot + nfp_5m_plot)
-print(base_plot + PCE_plus3_plot + PCE_minus3_plot)
-print(base_plot + retail_plus3_plot + retail_minus3_plot)
 
 # define range of z-scores for reaction curves
 z_vals <- seq(-3, 3, by = 0.1)
@@ -265,15 +266,11 @@ df_nfp <- build_reaction_df("NFP")
 df_PCE <- build_reaction_df("PCE")
 df_retail <- build_reaction_df("Retail")
 
-print(head(df_nfp))
-print(head(df_PCE))
-print(head(df_retail))
-
 # plots of change in expected return (bps) instead of raw %
 nfp_reaction_plot <- ggplot(df_nfp, aes(x = z, y = delta_bp)) +
   geom_hline(yintercept = 0, linetype = "dashed") +
   geom_line(linewidth = 1) +
-  coord_cartesian(ylim = c(-20, 20)) +
+  coord_cartesian(ylim = c(-60, 60)) +
   labs(
     title = "SPX Reaction to NFP Surprise",
     x = "NFP Surprise (z-score)",
@@ -283,17 +280,17 @@ nfp_reaction_plot <- ggplot(df_nfp, aes(x = z, y = delta_bp)) +
 PCE_reaction_plot <- ggplot(df_PCE, aes(x = z, y = delta_bp)) +
   geom_hline(yintercept = 0, linetype = "dashed") +
   geom_line(linewidth = 1) +
-  coord_cartesian(ylim = c(-20, 20)) +
+  coord_cartesian(ylim = c(-60, 60)) +
   labs(
-    title = "SPX Reaction to Core CPI Surprise",
-    x = "Core CPI Surprise (z-score)",
+    title = "SPX Reaction to Core PCE Surprise",
+    x = "Core PCE Surprise (z-score)",
     y = "Change in expected daily return (bps)"
   )
 
 retail_reaction_plot <- ggplot(df_retail, aes(x = z, y = delta_bp)) +
   geom_hline(yintercept = 0, linetype = "dashed") +
   geom_line(linewidth = 1) +
-  coord_cartesian(ylim = c(-20, 20)) +
+  coord_cartesian(ylim = c(-60, 60)) +
   labs(
     title = "SPX Reaction to Retail Sales Surprise",
     x = "Retail Sales Surprise (z-score)",
